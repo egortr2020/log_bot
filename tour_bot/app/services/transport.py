@@ -9,7 +9,10 @@ from urllib.parse import quote
 import aiohttp
 
 from tour_bot.app.config import settings  # при желании заменить на: from app.config import settings
+import logging
+from random import randint
 
+logger = logging.getLogger(__name__)
 
 SUGGEST_URL = "https://api.rasp.yandex.net/v3.0/suggest/"
 SEARCH_URL = "https://api.rasp.yandex.net/v3.0/search/"
@@ -315,18 +318,31 @@ async def fetch_real_options(
 ) -> List[TransportOption]:
     api_key = settings.YANDEX_RASP_API_KEY
     if not api_key:
+        logger.warning("YANDEX_RASP_API_KEY не задан, возвращаем пустой список")
         return []
 
     async with YandexRaspClient(api_key) as client:
         from_codes = await _resolve_place_codes(client, from_city)
         to_codes = await _resolve_place_codes(client, to_city)
 
-        from_code = from_codes.city_code or (from_codes.stations[0] if from_codes.stations else None)
-        to_code = to_codes.city_code or (to_codes.stations[0] if to_codes.stations else None)
-        if not from_code or not to_code:
+        from_candidates: List[str] = [c for c in [from_codes.city_code, *from_codes.stations] if c]
+        to_candidates: List[str] = [c for c in [to_codes.city_code, *to_codes.stations] if c]
+
+        # ограничим количество вариантов, чтобы не делать слишком много запросов
+        from_candidates = from_candidates[:3]
+        to_candidates = to_candidates[:3]
+
+        if not from_candidates or not to_candidates:
+            logger.warning(
+                "Не удалось получить коды городов: %s -> %s (from: %s, to: %s)",
+                from_city,
+                to_city,
+                from_codes,
+                to_codes,
+            )
             return []
 
-        allow_to_codes: Set[str] = set([to_code, *to_codes.stations])
+        allow_to_codes: Set[str] = set(to_candidates)
 
         dates = _collect_dates(window_start, window_end)
 
@@ -356,6 +372,15 @@ async def fetch_real_options(
                     all_options.append(opt)
 
         all_options.sort(key=lambda o: o.depart_time)
+        logger.info(
+            "Всего вариантов %s для %s -> %s в датах %s (from_codes=%s, to_codes=%s)",
+            len(all_options),
+            from_city,
+            to_city,
+            dates,
+            from_candidates,
+            to_candidates,
+        )
         return all_options
 
 
