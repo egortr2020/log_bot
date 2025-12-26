@@ -1,22 +1,58 @@
-from typing import Optional
-from tour_bot.app.services.transport import build_yandex_thread_link
+from collections import defaultdict
+from datetime import date
+from typing import Dict, Iterable, List
+from urllib.parse import quote
 
-from aiogram import Router, types, F
+from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 
-from urllib.parse import urlencode, quote
-from tour_bot.app.states import TourPlanStates
 from tour_bot.app.services.planner import build_segments
 from tour_bot.app.services.transport import (
+    TransportOption,
+    build_yandex_thread_link,
     fetch_real_options,
-    mock_generate_options,
     filter_and_sort_options,
 )
+from tour_bot.app.states import TourPlanStates
 
 
 
 router = Router()
+
+
+def _group_by_departure_day(options: Iterable[TransportOption]) -> Dict[date, List[TransportOption]]:
+    grouped: Dict[date, List[TransportOption]] = defaultdict(list)
+    for opt in options:
+        grouped[opt.depart_time.date()].append(opt)
+    return dict(sorted(grouped.items(), key=lambda item: item[0]))
+
+
+def _format_option(o: TransportOption) -> str:
+    icon = "✈️" if o.kind == "plane" else "🚆" if o.kind == "train" else "🚌"
+    link_line = ""
+    if o.thread_uid:
+        link = build_yandex_thread_link(
+            o.thread_uid,
+            o.depart_time.date().isoformat(),
+            o.from_code,
+            o.to_code,
+        )
+        link_line = f"\n🔗 [Открыть на Яндексе]({link})"
+
+    price_line = ""
+    if o.price is not None:
+        cur = (o.currency or "").upper()
+        price_line = f"\nцена от {o.price:.0f} {cur}"
+
+    return (
+        f"{icon} {o.title}\n"
+        f"выезд {o.depart_time}\n"
+        f"прибытие {o.arrive_time}\n"
+        f"длительность ~{o.duration_hours:.1f} ч"
+        f"{price_line}"
+        f"{link_line}"
+    )
 
 
 @router.message(Command("newtour"))
@@ -280,7 +316,7 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
     # для каждого сегмента ищем варианты переезда
     for seg in segments:
         # пробуем реальные данные
-            real_opts = await fetch_real_options(
+        real_opts = await fetch_real_options(
             from_city=seg["from_city"],
             to_city=seg["to_city"],
             window_start=seg["earliest_departure"],
@@ -300,8 +336,7 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
         # сортируем с учётом предпочтения
         opts_sorted = filter_and_sort_options(real_opts, pref)
 
-        # Ограничиваем до 5 вариантов
-        opts_sorted = opts_sorted[:5]
+        day_groups = _group_by_departure_day(opts_sorted)
 
         # шапка сегмента
         header = (
@@ -310,36 +345,17 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
             f"до приезда не позже {seg['latest_arrival']}\n"
         )
 
-        # список вариантов транспорта
-        # список вариантов транспорта
-        if not opts_sorted:
+        if not day_groups:
             body = "Подходящих вариантов не найдено.\n"
         else:
-            lines = []
-            for o in opts_sorted:
-                icon = "✈️" if o["kind"] == "plane" else "🚆"
-                link = build_yandex_thread_link(
-                    o.get("thread_uid", ""),
-                    o["depart_time"].date().isoformat(),
-                    o.get("from_code"),
-                    o.get("to_code"),
-                )
+            day_blocks: List[str] = []
+            for day, opts in day_groups.items():
+                # ограничиваем до 3 вариантов на каждый день, чтобы сообщение не разрасталось
+                top_opts = opts[:3]
+                options_text = "\n".join(_format_option(o) for o in top_opts)
+                day_blocks.append(f"📅 {day.isoformat()}\n{options_text}")
 
-                price_line = ""
-                if o.get("price") is not None:
-                    cur = (o.get("currency") or "").upper()
-                    price_line = f"\nцена от {o['price']:.0f} {cur}"
-
-                lines.append(
-                    f"{icon} {o['title']}\n"
-                    f"выезд {o['depart_time']}\n"
-                    f"прибытие {o['arrive_time']}\n"
-                    f"длительность ~{o['duration_hours']:.1f} ч"
-                    f"{price_line}\n"
-                    f"🔗 [Открыть на Яндексе]({link})"
-                )
-
-            body = "\n".join(lines) + "\n"
+            body = "\n\n".join(day_blocks) + "\n"
 
         answer_parts.append(header + body)
 
