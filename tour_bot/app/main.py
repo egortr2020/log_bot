@@ -7,8 +7,14 @@ from app.handlers import newtour, start  # <-- добавила start
 
 
 async def main():
+    token = settings.BOT_TOKEN.get_secret_value() if settings.BOT_TOKEN else None
+    if not token:
+        raise RuntimeError(
+            "Не задан BOT_TOKEN. Укажите токен бота в переменной окружения BOT_TOKEN или в файле .env"
+        )
+
     bot = Bot(
-        token=settings.BOT_TOKEN.get_secret_value(),
+        token=token,
         default=DefaultBotProperties(parse_mode="HTML"),
     )
     dp = Dispatcher()
