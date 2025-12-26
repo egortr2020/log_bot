@@ -273,76 +273,6 @@ def _collect_dates(window_start: datetime, window_end: datetime) -> List[str]:
     return dates
 
 
-def generate_mock_options(
-    from_city: str,
-    to_city: str,
-    window_start: datetime,
-    window_end: datetime,
-) -> List[TransportOption]:
-    """
-    Генерируем простые мок-варианты, чтобы пользователь видел пример расписания,
-    даже если реальное API ничего не отдало.
-    """
-    total_hours = (window_end - window_start).total_seconds() / 3600.0
-    depart_plane = window_start + timedelta(hours=min(6, max(1, total_hours / 4)))
-    arrive_plane = depart_plane + timedelta(hours=2 + randint(0, 2))
-
-    depart_train = window_start + timedelta(hours=min(12, max(3, total_hours / 2)))
-    arrive_train = depart_train + timedelta(hours=14 + randint(-2, 3))
-
-    options: List[TransportOption] = []
-
-    def _clamp(dt: datetime) -> datetime:
-        if dt < window_start:
-            return window_start
-        if dt > window_end:
-            return window_end - timedelta(hours=1)
-        return dt
-
-    depart_plane = _clamp(depart_plane)
-    arrive_plane = _clamp(arrive_plane)
-    depart_train = _clamp(depart_train)
-    arrive_train = _clamp(arrive_train)
-
-    options.append(
-        TransportOption(
-            kind="plane",
-            title=f"{from_city} — {to_city} (мок, самолёт)",
-            depart_time=depart_plane,
-            arrive_time=arrive_plane,
-            duration_hours=(arrive_plane - depart_plane).total_seconds() / 3600.0,
-            thread_uid=f"MOCK-PLANE-{from_city}-{to_city}",
-            from_code=None,
-            to_code=None,
-            price=randint(7000, 15000),
-            currency="RUB",
-        )
-    )
-    options.append(
-        TransportOption(
-            kind="train",
-            title=f"{from_city} — {to_city} (мок, поезд)",
-            depart_time=depart_train,
-            arrive_time=arrive_train,
-            duration_hours=(arrive_train - depart_train).total_seconds() / 3600.0,
-            thread_uid=f"MOCK-TRAIN-{from_city}-{to_city}",
-            from_code=None,
-            to_code=None,
-            price=randint(2500, 6000),
-            currency="RUB",
-        )
-    )
-
-    logger.info(
-        "Возвращаем мок-варианты для %s -> %s (окно %s - %s)",
-        from_city,
-        to_city,
-        window_start,
-        window_end,
-    )
-    return options
-
-
 async def _search_all_options_for_date(
     client: YandexRaspClient,
     *,
@@ -369,16 +299,6 @@ async def _search_all_options_for_date(
 
         parsed = _parse_segments(resp, allow_to_codes=allow_to_codes)
         all_options.extend(parsed)
-        logger.info(
-            "Поиск %s (%s -> %s) %s: получено %s вариантов (offset=%s, limit=%s)",
-            transport,
-            from_code,
-            to_code,
-            date,
-            len(parsed),
-            offset,
-            limit,
-        )
 
         pagination = (resp or {}).get("pagination") or {}
         total = pagination.get("total")
@@ -431,27 +351,25 @@ async def fetch_real_options(
 
         for date_str in dates:
             for transport in ("plane", "train"):
-                for from_code in from_candidates:
-                    for to_code in to_candidates:
-                        parsed_options = await _search_all_options_for_date(
-                            client,
-                            from_code=from_code,
-                            to_code=to_code,
-                            date=date_str,
-                            transport=transport,
-                            allow_to_codes=allow_to_codes,
-                        )
-                        for opt in parsed_options:
-                            if opt.depart_time < window_start:
-                                continue
-                            if opt.arrive_time > window_end:
-                                continue
+                parsed_options = await _search_all_options_for_date(
+                    client,
+                    from_code=from_code,
+                    to_code=to_code,
+                    date=date_str,
+                    transport=transport,
+                    allow_to_codes=allow_to_codes,
+                )
+                for opt in parsed_options:
+                    if opt.depart_time < window_start:
+                        continue
+                    if opt.arrive_time > window_end:
+                        continue
 
-                            key = (opt.thread_uid or opt.title) + "|" + opt.depart_time.isoformat()
-                            if key in seen:
-                                continue
-                            seen.add(key)
-                            all_options.append(opt)
+                    key = (opt.thread_uid or opt.title) + "|" + opt.depart_time.isoformat()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    all_options.append(opt)
 
         all_options.sort(key=lambda o: o.depart_time)
         logger.info(

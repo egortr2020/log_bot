@@ -1,4 +1,3 @@
-import logging
 from collections import defaultdict
 from datetime import date
 from typing import Dict, Iterable, List
@@ -13,7 +12,6 @@ from tour_bot.app.services.transport import (
     TransportOption,
     build_yandex_thread_link,
     fetch_real_options,
-    generate_mock_options,
     filter_and_sort_options,
 )
 from tour_bot.app.states import TourPlanStates
@@ -68,6 +66,40 @@ def _build_yandex_search_link(from_city: str, to_city: str, day: date) -> str:
     return (
         "https://rasp.yandex.ru/search/"
         f"?fromName={quote(from_city)}&toName={quote(to_city)}&when={quote(when)}"
+    )
+
+
+def _group_by_departure_day(options: Iterable[TransportOption]) -> Dict[date, List[TransportOption]]:
+    grouped: Dict[date, List[TransportOption]] = defaultdict(list)
+    for opt in options:
+        grouped[opt.depart_time.date()].append(opt)
+    return dict(sorted(grouped.items(), key=lambda item: item[0]))
+
+
+def _format_option(o: TransportOption) -> str:
+    icon = "✈️" if o.kind == "plane" else "🚆" if o.kind == "train" else "🚌"
+    link_line = ""
+    if o.thread_uid:
+        link = build_yandex_thread_link(
+            o.thread_uid,
+            o.depart_time.date().isoformat(),
+            o.from_code,
+            o.to_code,
+        )
+        link_line = f"\n🔗 [Открыть на Яндексе]({link})"
+
+    price_line = ""
+    if o.price is not None:
+        cur = (o.currency or "").upper()
+        price_line = f"\nцена от {o.price:.0f} {cur}"
+
+    return (
+        f"{icon} {o.title}\n"
+        f"выезд {o.depart_time}\n"
+        f"прибытие {o.arrive_time}\n"
+        f"длительность ~{o.duration_hours:.1f} ч"
+        f"{price_line}"
+        f"{link_line}"
     )
 
 
@@ -343,34 +375,11 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
     # для каждого сегмента ищем варианты переезда
     for seg in segments:
         # пробуем реальные данные
-        try:
-            real_opts = await fetch_real_options(
-                from_city=seg["from_city"],
-                to_city=seg["to_city"],
-                window_start=seg["earliest_departure"],
-                window_end=seg["latest_arrival"],
-            )
-            logger.info(
-                "Найдено %s вариантов для %s -> %s в окне %s - %s",
-                len(real_opts),
-                seg["from_city"],
-                seg["to_city"],
-                seg["earliest_departure"],
-                seg["latest_arrival"],
-            )
-        except Exception as e:
-            logger.exception(
-                "Ошибка при запросе вариантов %s -> %s: %s",
-                seg["from_city"],
-                seg["to_city"],
-                e,
-            )
-            real_opts = []
-
-        search_link = _build_yandex_search_link(
-            seg["from_city"],
-            seg["to_city"],
-            seg["earliest_departure"].date(),
+        real_opts = await fetch_real_options(
+            from_city=seg["from_city"],
+            to_city=seg["to_city"],
+            window_start=seg["earliest_departure"],
+            window_end=seg["latest_arrival"],
         )
 
         options_source = "real"
@@ -398,26 +407,14 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
         )
 
         if not day_groups:
-            body = (
-                "Подходящих вариантов не найдено.\n"
-                f"🔗 [Посмотреть все варианты на Яндексе]({search_link})\n"
-            )
+            body = "Подходящих вариантов не найдено.\n"
         else:
             day_blocks: List[str] = []
             for day, opts in day_groups.items():
                 # ограничиваем до 3 вариантов на каждый день, чтобы сообщение не разрасталось
                 top_opts = opts[:3]
-                logger.info(
-                    "День %s для %s -> %s: всего %s вариантов, показываем %s",
-                    day,
-                    seg["from_city"],
-                    seg["to_city"],
-                    len(opts),
-                    len(top_opts),
-                )
                 options_text = "\n".join(_format_option(o) for o in top_opts)
-                source_note = " (мок)" if options_source == "mock" else ""
-                day_blocks.append(f"📅 {day.isoformat()}{source_note}\n{options_text}")
+                day_blocks.append(f"📅 {day.isoformat()}\n{options_text}")
 
             body = "\n\n".join(day_blocks) + "\n"
 

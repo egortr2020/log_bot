@@ -8,11 +8,6 @@ from app.handlers import newtour, start  # <-- добавила start
 
 
 async def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
     token = settings.BOT_TOKEN.get_secret_value() if settings.BOT_TOKEN else None
     if not token:
         raise RuntimeError(
