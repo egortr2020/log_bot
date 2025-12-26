@@ -1,22 +1,74 @@
-from typing import Optional
-from tour_bot.app.services.transport import build_yandex_thread_link
+from collections import defaultdict
+from datetime import date
+from typing import Dict, Iterable, List
+from urllib.parse import quote
+from logging import getLogger
 
-from aiogram import Router, types, F
+from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 
-from urllib.parse import urlencode, quote
-from tour_bot.app.states import TourPlanStates
 from tour_bot.app.services.planner import build_segments
 from tour_bot.app.services.transport import (
+    TransportOption,
+    build_yandex_thread_link,
     fetch_real_options,
-    mock_generate_options,
+    generate_mock_options,
     filter_and_sort_options,
 )
+from tour_bot.app.states import TourPlanStates
 
 
 
 router = Router()
+logger = getLogger(__name__)
+
+
+def _group_by_departure_day(options: Iterable[TransportOption]) -> Dict[date, List[TransportOption]]:
+    grouped: Dict[date, List[TransportOption]] = defaultdict(list)
+    for opt in options:
+        grouped[opt.depart_time.date()].append(opt)
+    return dict(sorted(grouped.items(), key=lambda item: item[0]))
+
+
+def _format_option(o: TransportOption) -> str:
+    icon = "✈️" if o.kind == "plane" else "🚆" if o.kind == "train" else "🚌"
+    link_line = ""
+    if o.thread_uid:
+        link = build_yandex_thread_link(
+            o.thread_uid,
+            o.depart_time.date().isoformat(),
+            o.from_code,
+            o.to_code,
+        )
+        link_line = f"\n🔗 [Открыть на Яндексе]({link})"
+
+    price_line = ""
+    if o.price is not None:
+        cur = (o.currency or "").upper()
+        price_line = f"\nцена от {o.price:.0f} {cur}"
+
+    return (
+        f"{icon} {o.title}\n"
+        f"выезд {o.depart_time}\n"
+        f"прибытие {o.arrive_time}\n"
+        f"длительность ~{o.duration_hours:.1f} ч"
+        f"{price_line}"
+        f"{link_line}"
+    )
+
+
+def _build_yandex_search_link(from_city: str, to_city: str, day: date) -> str:
+    """
+    Универсальная ссылка на поиск всех вариантов между городами по конкретной дате.
+    Пример:
+    https://rasp.yandex.ru/search/?fromName=Москва&toName=Санкт-Петербург&when=2025-11-11
+    """
+    when = day.isoformat()
+    return (
+        "https://rasp.yandex.ru/search/"
+        f"?fromName={quote(from_city)}&toName={quote(to_city)}&when={quote(when)}"
+    )
 
 
 @router.message(Command("newtour"))
@@ -38,6 +90,8 @@ async def start_tour(message: types.Message, state: FSMContext):
 async def handle_cities(message: types.Message, state: FSMContext):
     raw = message.text.strip()
     cities = [c.strip() for c in raw.split(",") if c.strip()]
+
+    logger.info("Получен список городов: raw='%s', parsed=%s", raw, cities)
 
     if len(cities) < 2:
         await message.answer("Нужно минимум 2 города. Пришли ещё раз.")
@@ -87,6 +141,7 @@ async def handle_dates(message: types.Message, state: FSMContext):
 
     text_raw = message.text.replace("\r\n", "\n").strip()
     lines = [ln.strip() for ln in text_raw.split("\n") if ln.strip()]
+    logger.info("Получены даты концертов: lines=%s", lines)
 
     data = await state.get_data()
     cities_original: list[str] = data["cities_ordered"]
@@ -151,6 +206,11 @@ async def handle_dates(message: types.Message, state: FSMContext):
     if missing_human:
         # добавлю отладку, чтобы ты прямо в телеге видел, что бот распарсил, а что нет
         dbg_text = "\n".join(debug_lines) if debug_lines else "(нет отладочных данных)"
+        logger.warning(
+            "Не у всех городов есть дата: missing=%s, parsed=%s",
+            missing_human,
+            final_shows,
+        )
         await message.answer(
             "Не у всех городов есть дата. Не хватает:\n"
             + "\n".join(missing_human)
@@ -162,6 +222,7 @@ async def handle_dates(message: types.Message, state: FSMContext):
         return
 
     # Всё есть — сохраняем
+    logger.info("Итоговое сопоставление городов и дат: %s", final_shows)
     await state.update_data(shows=final_shows)
 
     # Спрашиваем предпочтение транспорта
@@ -275,33 +336,59 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
         buffer_after_hours=buf_after,
     )
 
+    logger.info("Построены сегменты тура: %s", segments)
+
     answer_parts = []
 
     # для каждого сегмента ищем варианты переезда
     for seg in segments:
         # пробуем реальные данные
+        try:
             real_opts = await fetch_real_options(
-            from_city=seg["from_city"],
-            to_city=seg["to_city"],
-            window_start=seg["earliest_departure"],
-            window_end=seg["latest_arrival"],
+                from_city=seg["from_city"],
+                to_city=seg["to_city"],
+                window_start=seg["earliest_departure"],
+                window_end=seg["latest_arrival"],
+            )
+            logger.info(
+                "Найдено %s вариантов для %s -> %s в окне %s - %s",
+                len(real_opts),
+                seg["from_city"],
+                seg["to_city"],
+                seg["earliest_departure"],
+                seg["latest_arrival"],
+            )
+        except Exception as e:
+            logger.exception(
+                "Ошибка при запросе вариантов %s -> %s: %s",
+                seg["from_city"],
+                seg["to_city"],
+                e,
+            )
+            real_opts = []
+
+        search_link = _build_yandex_search_link(
+            seg["from_city"],
+            seg["to_city"],
+            seg["earliest_departure"].date(),
         )
 
-        # если не получилось (нет API-ключа / нет кодов / пусто) — мок
-        if not real_opts:
-            header = (
-                f"{seg['from_city']} → {seg['to_city']}\n"
-                f"Окно выезда: с {seg['earliest_departure']} "
-                f"до приезда не позже {seg['latest_arrival']}\n"
+        options_source = "real"
+        opts_to_use = real_opts
+
+        if not opts_to_use:
+            options_source = "mock"
+            opts_to_use = generate_mock_options(
+                seg["from_city"],
+                seg["to_city"],
+                seg["earliest_departure"],
+                seg["latest_arrival"],
             )
-            answer_parts.append(header + "Подходящих вариантов не найдено.\n")
-            continue
 
         # сортируем с учётом предпочтения
-        opts_sorted = filter_and_sort_options(real_opts, pref)
+        opts_sorted = filter_and_sort_options(opts_to_use, pref)
 
-        # Ограничиваем до 5 вариантов
-        opts_sorted = opts_sorted[:5]
+        day_groups = _group_by_departure_day(opts_sorted)
 
         # шапка сегмента
         header = (
@@ -310,36 +397,29 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
             f"до приезда не позже {seg['latest_arrival']}\n"
         )
 
-        # список вариантов транспорта
-        # список вариантов транспорта
-        if not opts_sorted:
-            body = "Подходящих вариантов не найдено.\n"
+        if not day_groups:
+            body = (
+                "Подходящих вариантов не найдено.\n"
+                f"🔗 [Посмотреть все варианты на Яндексе]({search_link})\n"
+            )
         else:
-            lines = []
-            for o in opts_sorted:
-                icon = "✈️" if o["kind"] == "plane" else "🚆"
-                link = build_yandex_thread_link(
-                    o.get("thread_uid", ""),
-                    o["depart_time"].date().isoformat(),
-                    o.get("from_code"),
-                    o.get("to_code"),
+            day_blocks: List[str] = []
+            for day, opts in day_groups.items():
+                # ограничиваем до 3 вариантов на каждый день, чтобы сообщение не разрасталось
+                top_opts = opts[:3]
+                logger.info(
+                    "День %s для %s -> %s: всего %s вариантов, показываем %s",
+                    day,
+                    seg["from_city"],
+                    seg["to_city"],
+                    len(opts),
+                    len(top_opts),
                 )
+                options_text = "\n".join(_format_option(o) for o in top_opts)
+                source_note = " (мок)" if options_source == "mock" else ""
+                day_blocks.append(f"📅 {day.isoformat()}{source_note}\n{options_text}")
 
-                price_line = ""
-                if o.get("price") is not None:
-                    cur = (o.get("currency") or "").upper()
-                    price_line = f"\nцена от {o['price']:.0f} {cur}"
-
-                lines.append(
-                    f"{icon} {o['title']}\n"
-                    f"выезд {o['depart_time']}\n"
-                    f"прибытие {o['arrive_time']}\n"
-                    f"длительность ~{o['duration_hours']:.1f} ч"
-                    f"{price_line}\n"
-                    f"🔗 [Открыть на Яндексе]({link})"
-                )
-
-            body = "\n".join(lines) + "\n"
+            body = "\n\n".join(day_blocks) + "\n"
 
         answer_parts.append(header + body)
 
