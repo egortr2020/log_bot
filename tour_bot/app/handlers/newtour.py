@@ -1,3 +1,4 @@
+import logging
 from collections import defaultdict
 from datetime import date
 from typing import Dict, Iterable, List
@@ -19,6 +20,7 @@ from tour_bot.app.states import TourPlanStates
 
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def _group_by_departure_day(options: Iterable[TransportOption]) -> Dict[date, List[TransportOption]]:
@@ -324,17 +326,36 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
         buffer_after_hours=buf_after,
     )
 
+    logger.info("Построены сегменты тура: %s", segments)
+
     answer_parts = []
 
     # для каждого сегмента ищем варианты переезда
     for seg in segments:
         # пробуем реальные данные
-        real_opts = await fetch_real_options(
-            from_city=seg["from_city"],
-            to_city=seg["to_city"],
-            window_start=seg["earliest_departure"],
-            window_end=seg["latest_arrival"],
-        )
+        try:
+            real_opts = await fetch_real_options(
+                from_city=seg["from_city"],
+                to_city=seg["to_city"],
+                window_start=seg["earliest_departure"],
+                window_end=seg["latest_arrival"],
+            )
+            logger.info(
+                "Найдено %s вариантов для %s -> %s в окне %s - %s",
+                len(real_opts),
+                seg["from_city"],
+                seg["to_city"],
+                seg["earliest_departure"],
+                seg["latest_arrival"],
+            )
+        except Exception as e:
+            logger.exception(
+                "Ошибка при запросе вариантов %s -> %s: %s",
+                seg["from_city"],
+                seg["to_city"],
+                e,
+            )
+            real_opts = []
 
         search_link = _build_yandex_search_link(
             seg["from_city"],

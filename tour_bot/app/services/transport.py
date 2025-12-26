@@ -9,7 +9,9 @@ from urllib.parse import quote
 import aiohttp
 
 from tour_bot.app.config import settings  # при желании заменить на: from app.config import settings
+import logging
 
+logger = logging.getLogger(__name__)
 
 SUGGEST_URL = "https://api.rasp.yandex.net/v3.0/suggest/"
 SEARCH_URL = "https://api.rasp.yandex.net/v3.0/search/"
@@ -315,6 +317,7 @@ async def fetch_real_options(
 ) -> List[TransportOption]:
     api_key = settings.YANDEX_RASP_API_KEY
     if not api_key:
+        logger.warning("YANDEX_RASP_API_KEY не задан, возвращаем пустой список")
         return []
 
     async with YandexRaspClient(api_key) as client:
@@ -324,6 +327,13 @@ async def fetch_real_options(
         from_code = from_codes.city_code or (from_codes.stations[0] if from_codes.stations else None)
         to_code = to_codes.city_code or (to_codes.stations[0] if to_codes.stations else None)
         if not from_code or not to_code:
+            logger.warning(
+                "Не удалось получить коды городов: %s -> %s (from: %s, to: %s)",
+                from_city,
+                to_city,
+                from_codes,
+                to_codes,
+            )
             return []
 
         allow_to_codes: Set[str] = set([to_code, *to_codes.stations])
@@ -356,6 +366,13 @@ async def fetch_real_options(
                     all_options.append(opt)
 
         all_options.sort(key=lambda o: o.depart_time)
+        logger.info(
+            "Всего вариантов %s для %s -> %s в датах %s",
+            len(all_options),
+            from_city,
+            to_city,
+            dates,
+        )
         return all_options
 
 
