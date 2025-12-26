@@ -13,6 +13,7 @@ from tour_bot.app.services.transport import (
     TransportOption,
     build_yandex_thread_link,
     fetch_real_options,
+    generate_mock_options,
     filter_and_sort_options,
 )
 from tour_bot.app.states import TourPlanStates
@@ -372,27 +373,20 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
             seg["earliest_departure"].date(),
         )
 
-        # если не получилось (нет API-ключа / нет кодов / пусто) — мок
-        if not real_opts:
-            header = (
-                f"{seg['from_city']} → {seg['to_city']}\n"
-                f"Окно выезда: с {seg['earliest_departure']} "
-                f"до приезда не позже {seg['latest_arrival']}\n"
-            )
-            logger.info(
-                "Нет вариантов из API для %s -> %s, отдаём ссылку поиска",
+        options_source = "real"
+        opts_to_use = real_opts
+
+        if not opts_to_use:
+            options_source = "mock"
+            opts_to_use = generate_mock_options(
                 seg["from_city"],
                 seg["to_city"],
+                seg["earliest_departure"],
+                seg["latest_arrival"],
             )
-            answer_parts.append(
-                header
-                + "Подходящих вариантов не найдено.\n"
-                + f"🔗 [Посмотреть все варианты на Яндексе]({search_link})\n"
-            )
-            continue
 
         # сортируем с учётом предпочтения
-        opts_sorted = filter_and_sort_options(real_opts, pref)
+        opts_sorted = filter_and_sort_options(opts_to_use, pref)
 
         day_groups = _group_by_departure_day(opts_sorted)
 
@@ -422,7 +416,8 @@ async def handle_buffer_after(message: types.Message, state: FSMContext):
                     len(top_opts),
                 )
                 options_text = "\n".join(_format_option(o) for o in top_opts)
-                day_blocks.append(f"📅 {day.isoformat()}\n{options_text}")
+                source_note = " (мок)" if options_source == "mock" else ""
+                day_blocks.append(f"📅 {day.isoformat()}{source_note}\n{options_text}")
 
             body = "\n\n".join(day_blocks) + "\n"
 

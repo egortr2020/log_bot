@@ -10,6 +10,7 @@ import aiohttp
 
 from tour_bot.app.config import settings  # при желании заменить на: from app.config import settings
 import logging
+from random import randint
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +271,76 @@ def _collect_dates(window_start: datetime, window_end: datetime) -> List[str]:
         dates.append(cur.strftime("%Y-%m-%d"))
         cur += timedelta(days=1)
     return dates
+
+
+def generate_mock_options(
+    from_city: str,
+    to_city: str,
+    window_start: datetime,
+    window_end: datetime,
+) -> List[TransportOption]:
+    """
+    Генерируем простые мок-варианты, чтобы пользователь видел пример расписания,
+    даже если реальное API ничего не отдало.
+    """
+    total_hours = (window_end - window_start).total_seconds() / 3600.0
+    depart_plane = window_start + timedelta(hours=min(6, max(1, total_hours / 4)))
+    arrive_plane = depart_plane + timedelta(hours=2 + randint(0, 2))
+
+    depart_train = window_start + timedelta(hours=min(12, max(3, total_hours / 2)))
+    arrive_train = depart_train + timedelta(hours=14 + randint(-2, 3))
+
+    options: List[TransportOption] = []
+
+    def _clamp(dt: datetime) -> datetime:
+        if dt < window_start:
+            return window_start
+        if dt > window_end:
+            return window_end - timedelta(hours=1)
+        return dt
+
+    depart_plane = _clamp(depart_plane)
+    arrive_plane = _clamp(arrive_plane)
+    depart_train = _clamp(depart_train)
+    arrive_train = _clamp(arrive_train)
+
+    options.append(
+        TransportOption(
+            kind="plane",
+            title=f"{from_city} — {to_city} (мок, самолёт)",
+            depart_time=depart_plane,
+            arrive_time=arrive_plane,
+            duration_hours=(arrive_plane - depart_plane).total_seconds() / 3600.0,
+            thread_uid=f"MOCK-PLANE-{from_city}-{to_city}",
+            from_code=None,
+            to_code=None,
+            price=randint(7000, 15000),
+            currency="RUB",
+        )
+    )
+    options.append(
+        TransportOption(
+            kind="train",
+            title=f"{from_city} — {to_city} (мок, поезд)",
+            depart_time=depart_train,
+            arrive_time=arrive_train,
+            duration_hours=(arrive_train - depart_train).total_seconds() / 3600.0,
+            thread_uid=f"MOCK-TRAIN-{from_city}-{to_city}",
+            from_code=None,
+            to_code=None,
+            price=randint(2500, 6000),
+            currency="RUB",
+        )
+    )
+
+    logger.info(
+        "Возвращаем мок-варианты для %s -> %s (окно %s - %s)",
+        from_city,
+        to_city,
+        window_start,
+        window_end,
+    )
+    return options
 
 
 async def _search_all_options_for_date(
