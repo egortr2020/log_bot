@@ -4,7 +4,7 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    BOT_TOKEN: SecretStr
+    BOT_TOKEN: Optional[SecretStr] = None
     ADMINS: List[int] = []
 
     # новый параметр: ключ внешнего API расписаний
