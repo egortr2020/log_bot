@@ -132,7 +132,16 @@ class YandexRaspClient:
 
         return PlaceCodes(city_code=city_code, stations=tuple(station_ids))
 
-    async def search(self, *, from_code: str, to_code: str, date: str, transport_types: str) -> Dict[str, Any]:
+    async def search(
+        self,
+        *,
+        from_code: str,
+        to_code: str,
+        date: str,
+        transport_types: str,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
         params = {
             "apikey": self.api_key,
             "format": "json",
@@ -142,6 +151,8 @@ class YandexRaspClient:
             "date": date,
             "transport_types": transport_types,
             "transfers": "false",
+            "offset": offset,
+            "limit": limit,
         }
         return await self._get_json(SEARCH_URL, params=params)
 
@@ -259,6 +270,43 @@ def _collect_dates(window_start: datetime, window_end: datetime) -> List[str]:
     return dates
 
 
+async def _search_all_options_for_date(
+    client: YandexRaspClient,
+    *,
+    from_code: str,
+    to_code: str,
+    date: str,
+    transport: str,
+    allow_to_codes: Set[str],
+) -> List[TransportOption]:
+    all_options: List[TransportOption] = []
+    offset = 0
+    limit = 100
+    max_pages = 10  # safety to avoid infinite pagination loops
+
+    for _ in range(max_pages):
+        resp = await client.search(
+            from_code=from_code,
+            to_code=to_code,
+            date=date,
+            transport_types=transport,
+            offset=offset,
+            limit=limit,
+        )
+
+        parsed = _parse_segments(resp, allow_to_codes=allow_to_codes)
+        all_options.extend(parsed)
+
+        pagination = (resp or {}).get("pagination") or {}
+        total = pagination.get("total")
+        if total is None or offset + limit >= total or not parsed:
+            break
+
+        offset += limit
+
+    return all_options
+
+
 async def fetch_real_options(
     from_city: str,
     to_city: str,
@@ -287,13 +335,15 @@ async def fetch_real_options(
 
         for date_str in dates:
             for transport in ("plane", "train"):
-                resp = await client.search(
+                parsed_options = await _search_all_options_for_date(
+                    client,
                     from_code=from_code,
                     to_code=to_code,
                     date=date_str,
-                    transport_types=transport,
+                    transport=transport,
+                    allow_to_codes=allow_to_codes,
                 )
-                for opt in _parse_segments(resp, allow_to_codes=allow_to_codes):
+                for opt in parsed_options:
                     if opt.depart_time < window_start:
                         continue
                     if opt.arrive_time > window_end:
